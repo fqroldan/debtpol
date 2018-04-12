@@ -19,8 +19,10 @@ function compute_consumption_nag!(nag::NAG_ECM)
     for (i_τ,τ_v) in enumerate(nag.τgrid)
         for (i_q,q_v) in enumerate(nag.qgrid)
             for (i_l,l_v) in enumerate(nag.lgrid)
+                τl = 1.0 - τ_v*l_v^(-nag.τ2)
                 for (i_b,b_v) in enumerate(nag.bgrid)
                     nag.c_mat[i_b,i_l,i_q,i_τ]  = wage*l_v*(1.0-nag.τY) + b_v*nag.repay  - τ_v - nag.bprime_mat[i_b,i_l,i_q,i_τ]*q_v
+                    nag.c_mat[i_b,i_l,i_q,i_τ]  = wage*l_v*(1.0-τl) + b_v*nag.repay - nag.bprime_mat[i_b,i_l,i_q,i_τ]*q_v
                 end
             end
         end
@@ -104,13 +106,16 @@ function compute_envelope_nag(nag::NAG_ECM, ctilde_mat)
             wage = nag.A_bar
 
             for (i_l,l_v) in enumerate(nag.lgrid)
+                τl = 1.0 - τ_v*l_v^(-nag.τ2)
                 for (i_b,b_v) in enumerate(nag.bgrid)
 
                     bprime = (1.0/q_v)*(wage*l_v*(1.0-nag.τY) + b_v - ctilde_mat[i_b,i_l,i_q,i_τ] - τ_v)
+                    bprime = (1.0/q_v)*(wage*l_v*(1.0-τl) + b_v - ctilde_mat[i_b,i_l,i_q,i_τ])
 
                     if bprime<0.0
                         nag.bprime_mat[i_b,i_l,i_q,i_τ] = nag.bgrid[1]
                         cc  = wage*l_v*(1.0-nag.τY)+b_v  - τ_v - qp_v*nag.bgrid[1] # cambio aca!! antes tenia 0
+                        cc  = wage*l_v*(1.0-τl)+b_v - qp_v*nag.bgrid[1] # cambio aca!! antes tenia 0
                         Vb_mat_new[i_b,i_l,i_q,i_τ] = uprime(nag,cc)
                     else
                         nag.bprime_mat[i_b, i_l, i_q, i_τ] = bprime
@@ -234,7 +239,7 @@ function compute_bonds_in_grid!(nag::NAG_ECM,EVf)
         for (i_q, q_v) in enumerate(nag.qgrid)
 
             for (i_l, l_v) in enumerate(nag.lgrid)
-
+                τl = 1.0 - τ_v*l_v^(-nag.τ2)
                 for (i_b, b_v) in enumerate(nag.bgrid)
 
                     rhs0 = -1e14
@@ -244,6 +249,7 @@ function compute_bonds_in_grid!(nag::NAG_ECM,EVf)
                     for (i_bp, bp_v) in enumerate(nag.bgrid)
 
                         cc    = wage*l_v*(1.0-nag.τY) + b_v  - τ_v - bp_v*q_v
+                        cc    = wage*l_v*(1.0-τl) + b_v - bp_v*q_v
                         if cc <=0.0 ; rhs = -1e14
                         else
                             rhs   = ufun(nag,cc) + nag.β*EVf[i_bp, i_l, i_q, i_τ]

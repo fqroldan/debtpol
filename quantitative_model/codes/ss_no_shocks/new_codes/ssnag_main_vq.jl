@@ -10,6 +10,7 @@ type NAG_ECM
     ρl::Float64 # Autocorrelation idiocyncratic shock
     σl::Float64 # std of idiocyncratic shock
     τY::Float64 # Tax on wages
+    τ2::Float64 # Progressivity of taxation
 
     # Grid Parameters
     nl::Int  # Number of gridpoints for idiosyncratic shock
@@ -78,7 +79,8 @@ function nag_economy(;  β   = 0.97,
                         e_bar = 0.25+τY, #0.01+τY,
                         repay = 1.0,
                         maxit = 500,#2000,
-                        tol_dist = 1e-4)#5e-3)
+                        tol_dist = 1e-4,#5e-3
+                        τ2 = 0.10)
 
 
     # Calibration
@@ -136,8 +138,10 @@ function nag_economy(;  β   = 0.97,
     for (i_τ,τ_v) in enumerate(τgrid)
         for (i_q,q_v) in enumerate(qgrid)
             for (i_l,l_v) in enumerate(lgrid)
+                τl = 1.0 - τ_v*l_v^(-τ2)
                 for (i_b,b_v) in enumerate(bgrid)
                     disp_income = A_bar*l_v*(1.0-τY) - τ_v + b_v*repay
+                    disp_income = A_bar*l_v*(1.0-τl) + b_v*repay
                     disp_income>0.0 || throw(error("Negative disp_income"))
                     Vb_mat[i_b,i_l,i_q,i_τ] = (disp_income*0.9)^(-γ)
                 end
@@ -157,6 +161,8 @@ function nag_economy(;  β   = 0.97,
     for i_τ=1:nτ
         for i_q=1:nq
             B_mat[i_q,i_τ] = (e_bar - τY - τgrid[i_τ])/(qgrid[i_q] - 1.0)
+            tax_coll = 1.0 - τ_v * dot(lgrid.^(1.0-τ2), Πl_ast)
+            B_mat[i_q,i_τ] = (e_bar - tax_coll)/(qgrid[i_q] - 1.0)
         end
     end
 
