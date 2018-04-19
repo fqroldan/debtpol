@@ -10,6 +10,7 @@ type NAG_ECM
     ρl::Float64 # Autocorrelation idiocyncratic shock
     σl::Float64 # std of idiocyncratic shock
     τY::Float64 # Tax on wages
+    prog_tax::Bool # Progressive taxes
     τ2::Float64 # Progressivity of taxation
 
     # Grid Parameters
@@ -66,7 +67,7 @@ function nag_economy(;  β   = 0.97,
                         ρl  = 0.9,
                         σl  = 0.05,
                         τY  = 0.005,
-                        nl  = 7,
+                        nl  = 3,
                         nb  = 151,
                         nq  = 20,
                         nσB = 5,
@@ -80,12 +81,13 @@ function nag_economy(;  β   = 0.97,
                         repay = 1.0,
                         maxit = 500,#2000,
                         tol_dist = 1e-4,#5e-3
+                        prog_tax = true,
                         τ2 = 0.10)
 
 
     # Calibration
-    # ρl    = 0.6   # Aiyagari (1994)
-    # σl    = 0.2   # Aiyagari (1994)
+    ρl    = 0.6   # Aiyagari (1994)
+    σl    = 0.15   # Aiyagari (1994)
 
     do_MCG = 0
 
@@ -105,7 +107,7 @@ function nag_economy(;  β   = 0.97,
 
 
     """ Define process for endowment of labor """
-    lgrid, Πl = tauchen_fun(nl, ρl, σl)
+    lgrid, Πl = tauchen_fun(nl, ρl, σl, m=3)
     lgrid     = collect(exp.(lgrid))
 
     # # Based on Davila et al (2012)
@@ -123,10 +125,40 @@ function nag_economy(;  β   = 0.97,
     Πl_ast      = real(squeeze(Πl_ast, 2))
     Πl_ast      = Πl_ast ./ sum(Πl_ast)
 
-    τmin1 = e_bar-τY+1e-8
-    τmax1 = A_bar*lgrid[1]*(1.0-τY)*0.8
-    τgrid = collect(linspace(τmin1,min(τmax1,0.3),nτ))
+    if prog_tax
+        function B_τ(τv, qv)
+            tax_coll = 1.0 - τv * dot(lgrid.^(1.0-τ2), Πl_ast)
+            B = (e_bar - tax_coll)/(qv - 1.0)
+
+            return B
+        end
+        res = Optim.optimize(τ -> (B_τ(τ, qgrid[end]) - 0.5)^2, 1e-8, 1.0 - 1e-8, GoldenSection())
+        τlowB = Optim.minimizer(res)
+        Optim.minimum(res) < 1e-6 || throw(error("can't find good taxes"))
+        res = Optim.optimize(τ -> (B_τ(τ, qgrid[1]) - 1.5)^2, 1e-8, 1.0 - 1e-8, GoldenSection())
+        τhighB = Optim.minimizer(res)
+        Optim.minimum(res) < 1e-6 || throw(error("can't find good taxes"))
+        τmin1 = min(τlowB, τhighB)
+        τmax1 = max(τlowB, τhighB)
+        τgrid = collect(linspace(τmin1,τmax1,nτ))
+    else
+        τmin1 = e_bar-τY+1e-8
+        τmax1 = A_bar*lgrid[1]*(1.0-τY)*0.8
+        τgrid = collect(linspace(τmin1,min(τmax1,0.3),nτ))
+    end
+
     # τgrid = collect(linspace(τmin1,τmin1+0.01,nτ))
+    
+    B_mat = Array{Float64}(nq,nτ)
+    for (i_τ, τ_v) in enumerate(τgrid)
+        for i_q=1:nq
+            B_mat[i_q,i_τ] = (e_bar - τY - τ_v)/(qgrid[i_q] - 1.0)
+            if prog_tax
+                tax_coll = 1.0 - τ_v * dot(lgrid.^(1.0-τ2), Πl_ast)
+                B_mat[i_q,i_τ] = (e_bar - tax_coll)/(qgrid[i_q] - 1.0)
+            end
+        end
+    end
 
     if do_MCG == 1
         τgrid = collect(linspace(-0.145,-0.09,nτ))
@@ -141,7 +173,9 @@ function nag_economy(;  β   = 0.97,
                 τl = 1.0 - τ_v*l_v^(-τ2)
                 for (i_b,b_v) in enumerate(bgrid)
                     disp_income = A_bar*l_v*(1.0-τY) - τ_v + b_v*repay
-                    disp_income = A_bar*l_v*(1.0-τl) + b_v*repay
+                    if prog_tax
+                        disp_income = A_bar*l_v*(1.0-τl) + b_v*repay
+                    end
                     disp_income>0.0 || throw(error("Negative disp_income"))
                     Vb_mat[i_b,i_l,i_q,i_τ] = (disp_income*0.9)^(-γ)
                 end
@@ -156,17 +190,7 @@ function nag_economy(;  β   = 0.97,
 
     num_nodes = size(snodes,1)
 
-    B_mat = Array{Float64}(nq,nτ)
-
-    for i_τ=1:nτ
-        for i_q=1:nq
-            B_mat[i_q,i_τ] = (e_bar - τY - τgrid[i_τ])/(qgrid[i_q] - 1.0)
-            tax_coll = 1.0 - τ_v * dot(lgrid.^(1.0-τ2), Πl_ast)
-            B_mat[i_q,i_τ] = (e_bar - tax_coll)/(qgrid[i_q] - 1.0)
-        end
-    end
-
-    return NAG_ECM(β,γ,ρl,σl,τY,nl,nb,nq,nτ,nB,nσB,nq0,num_nodes,n_et,bgrid,lgrid,qgrid,τgrid,Bgrid,σBgrid,quad_nodes,quad_weights,b_grid_fine,snodes,
+    return NAG_ECM(β,γ,ρl,σl,τY,prog_tax,τ2,nl,nb,nq,nτ,nB,nσB,nq0,num_nodes,n_et,bgrid,lgrid,qgrid,τgrid,Bgrid,σBgrid,quad_nodes,quad_weights,b_grid_fine,snodes,
                    A_bar,L_bar,e_bar,repay,Πl,Πl_ast,Vf,Vb_mat,c_mat,bprime_mat,B_mat,maxit,tol_dist)
 
 end
@@ -187,120 +211,124 @@ nag        = nag_economy()
 ctilde_mat = zeros(size(nag.Vb_mat))
 bprime_mat = copy(ctilde_mat)
 
-@time iterate_envelope_nag!(nag, ctilde_mat)
-@time compute_consumption_nag!(nag)
-@time compute_Vf_nag!(nag)
+# @time iterate_envelope_nag!(nag, ctilde_mat)
+# @time compute_consumption_nag!(nag)
+# @time compute_Vf_nag!(nag)
 
 
-numerator, denominator = 0.0, 0.0
+# numerator, denominator = 0.0, 0.0
 
-for ii=1:nag.nl, jj=1:nag.nl
-    numerator   += abs(nag.lgrid[ii]-nag.lgrid[jj])
-    denominator += nag.lgrid[jj]
-end
+# for ii=1:nag.nl, jj=1:nag.nl
+#     numerator   += abs(nag.lgrid[ii]-nag.lgrid[jj])
+#     denominator += nag.lgrid[jj]
+# end
 
-gini_index_labor = numerator / (2*denominator)
-
-
-
-# """ Solve for the SS equilibrium """
-
-include("solve_ssnag_eqm_vq.jl")
-
-# τvec_comp_an = [nag.τgrid[1];nag.τgrid[end]]
-τvec_comp_an = copy(nag.τgrid)
-
-function compute_all_SS(nag::NAG_ECM, τvec_comp_an; do_simple_in=true)
-
-    nτ       = size(τvec_comp_an,1)
-    λast_out = Array{Float64}(size(nag.snodes,1),nτ)
-    dens_b   = Array{Float64}(length(nag.b_grid_fine),nτ)
-    B_demand, B_supply, q_out_SS, welf_out = Array{Float64}(nτ), Array{Float64}(nτ), Array{Float64}(nτ), Array{Float64}(nτ)
-
-    qgrid_cell_SS, bp_cell_SS, Vf_cell_SS, Vb_cell_SS = [], [], [], []
-
-    for i_τ=1:nτ
-
-        out_SS_objects  = compute_ss_root(nag, τvec_comp_an[i_τ], do_simple=do_simple_in)
-
-        λast_out[:,i_τ] = out_SS_objects[1]
-        B_demand[i_τ]   = out_SS_objects[2]
-        B_supply[i_τ]   = out_SS_objects[3]
-        q_out_SS[i_τ]   = out_SS_objects[4]
-        qgrid_input     = out_SS_objects[5]
-        Vf_input        = out_SS_objects[6]
-        bpmat_out_SS    = out_SS_objects[7]
-        Vbp_out_SS      = out_SS_objects[8]
-
-        welf_out[i_τ] = compute_welfare_nag(nag, λast_out[:,i_τ], q_out_SS[i_τ], qgrid_input, Vf_input)
-        dens_b[:,i_τ] = sum(reshape(λast_out[:,i_τ],length(nag.b_grid_fine),nag.nl),2)
-
-        push!(qgrid_cell_SS, qgrid_input)
-        push!(bp_cell_SS,    bpmat_out_SS)
-        push!(Vf_cell_SS,    Vf_input)
-        push!(Vb_cell_SS,    Vbp_out_SS)
+# gini_index_labor = numerator / (2*denominator)
 
 
-    end
 
-    return λast_out, dens_b, B_demand, B_supply, q_out_SS, welf_out, qgrid_cell_SS, bp_cell_SS, Vf_cell_SS, Vb_cell_SS
-end
+# # """ Solve for the SS equilibrium """
 
-@time λast_out, dens_b, B_demand, B_supply, q_out_SS, welf_out, qgrid_cell_SS, bp_cell_SS, Vf_cell_SS, Vb_cell_SS = compute_all_SS(nag, τvec_comp_an; do_simple_in=true);
+# include("solve_ssnag_eqm_vq.jl")
 
-nag.Bgrid = copy(B_demand)
+# # τvec_comp_an = [nag.τgrid[1];nag.τgrid[end]]
+# if nag.prog_tax
+#     τvec_comp_an = 1.0 - nag.τgrid * dot(nag.lgrid.^(1.0-nag.τ2), nag.Πl_ast)
+# else
+#     τvec_comp_an = copy(nag.τgrid)
+# end
 
-# # ## Compute Gini Indices on Wealth
-# # income_dens = zeros(nag.num_nodes,3)
+# function compute_all_SS(nag::NAG_ECM, τvec_comp_an; do_simple_in=true)
 
-# # for i_s = 1:nag.num_nodes
-# #     income_dens[i_s, 1] = nag.snodes[i_s,1] + nag.snodes[i_s,2]
-# #     income_dens[i_s, 2] = λast_out[i_s, 1]
-# #     income_dens[i_s, 3] = λast_out[i_s, 2]
-# # end
+#     nτ       = size(τvec_comp_an,1)
+#     λast_out = Array{Float64}(size(nag.snodes,1),nτ)
+#     dens_b   = Array{Float64}(length(nag.b_grid_fine),nτ)
+#     B_demand, B_supply, q_out_SS, welf_out = Array{Float64}(nτ), Array{Float64}(nτ), Array{Float64}(nτ), Array{Float64}(nτ)
 
-# # income_dens_sorted = sortrows(income_dens)
+#     qgrid_cell_SS, bp_cell_SS, Vf_cell_SS, Vb_cell_SS = [], [], [], []
 
-# # numerator1, numerator2 = 0.0, 0.0
-# # for i_s = 1:nag.num_nodes
+#     for i_τ=1:nτ
 
-# #     Sim1_1, S_i_1 = 0.0, 0.0
-# #     Sim1_2, S_i_2 = 0.0, 0.0
+#         out_SS_objects  = compute_ss_root(nag, nag.τgrid[i_τ], do_simple=do_simple_in)
 
-# #     if i_s > 1
-# #         for jj=1:i_s-1
-# #             Sim1_1 += income_dens_sorted[jj, 2]*income_dens_sorted[jj, 1]
-# #             Sim1_2 += income_dens_sorted[jj, 3]*income_dens_sorted[jj, 1]
-# #         end
-# #     end
-# #     for jj=1:i_s
-# #         S_i_1  += income_dens_sorted[jj, 2]*income_dens_sorted[jj, 1]
-# #         S_i_2  += income_dens_sorted[jj, 3]*income_dens_sorted[jj, 1]
-# #     end
+#         λast_out[:,i_τ] = out_SS_objects[1]
+#         B_demand[i_τ]   = out_SS_objects[2]
+#         B_supply[i_τ]   = out_SS_objects[3]
+#         q_out_SS[i_τ]   = out_SS_objects[4]
+#         qgrid_input     = out_SS_objects[5]
+#         Vf_input        = out_SS_objects[6]
+#         bpmat_out_SS    = out_SS_objects[7]
+#         Vbp_out_SS      = out_SS_objects[8]
 
-# #     numerator1 += income_dens_sorted[i_s, 2]*(Sim1_1 + S_i_1)
-# #     numerator2 += income_dens_sorted[i_s, 3]*(Sim1_2 + S_i_2)
-# # end
+#         welf_out[i_τ] = compute_welfare_nag(nag, λast_out[:,i_τ], q_out_SS[i_τ], qgrid_input, Vf_input)
+#         dens_b[:,i_τ] = sum(reshape(λast_out[:,i_τ],length(nag.b_grid_fine),nag.nl),2)
 
-# # denominator1, denominator2 = 0.0, 0.0
-
-# # for jj=1:nag.num_nodes
-# #     denominator1  += income_dens_sorted[jj, 2]*income_dens_sorted[jj, 1]
-# #     denominator2  += income_dens_sorted[jj, 3]*income_dens_sorted[jj, 1]
-# # end
-
-# # gini_wealth     = zeros(2)
-
-# # gini_wealth[1]  = 1.0 - numerator1/denominator1
-# # gini_wealth[2]  = 1.0 - numerator2/denominator2
-
-# # @printf("Gini indices on wealth are %.2f and %.2f\n", gini_wealth[1], gini_wealth[2])
+#         push!(qgrid_cell_SS, qgrid_input)
+#         push!(bp_cell_SS,    bpmat_out_SS)
+#         push!(Vf_cell_SS,    Vf_input)
+#         push!(Vb_cell_SS,    Vbp_out_SS)
 
 
-# # b_poster = [0.0;1.0;3.0]
+#     end
+
+#     return λast_out, dens_b, B_demand, B_supply, q_out_SS, welf_out, qgrid_cell_SS, bp_cell_SS, Vf_cell_SS, Vb_cell_SS
+# end
+
+# @time λast_out, dens_b, B_demand, B_supply, q_out_SS, welf_out, qgrid_cell_SS, bp_cell_SS, Vf_cell_SS, Vb_cell_SS = compute_all_SS(nag, τvec_comp_an; do_simple_in=true);
+
+# nag.Bgrid = copy(B_demand)
+
+# # # ## Compute Gini Indices on Wealth
+# # # income_dens = zeros(nag.num_nodes,3)
+
+# # # for i_s = 1:nag.num_nodes
+# # #     income_dens[i_s, 1] = nag.snodes[i_s,1] + nag.snodes[i_s,2]
+# # #     income_dens[i_s, 2] = λast_out[i_s, 1]
+# # #     income_dens[i_s, 3] = λast_out[i_s, 2]
+# # # end
+
+# # # income_dens_sorted = sortrows(income_dens)
+
+# # # numerator1, numerator2 = 0.0, 0.0
+# # # for i_s = 1:nag.num_nodes
+
+# # #     Sim1_1, S_i_1 = 0.0, 0.0
+# # #     Sim1_2, S_i_2 = 0.0, 0.0
+
+# # #     if i_s > 1
+# # #         for jj=1:i_s-1
+# # #             Sim1_1 += income_dens_sorted[jj, 2]*income_dens_sorted[jj, 1]
+# # #             Sim1_2 += income_dens_sorted[jj, 3]*income_dens_sorted[jj, 1]
+# # #         end
+# # #     end
+# # #     for jj=1:i_s
+# # #         S_i_1  += income_dens_sorted[jj, 2]*income_dens_sorted[jj, 1]
+# # #         S_i_2  += income_dens_sorted[jj, 3]*income_dens_sorted[jj, 1]
+# # #     end
+
+# # #     numerator1 += income_dens_sorted[i_s, 2]*(Sim1_1 + S_i_1)
+# # #     numerator2 += income_dens_sorted[i_s, 3]*(Sim1_2 + S_i_2)
+# # # end
+
+# # # denominator1, denominator2 = 0.0, 0.0
+
+# # # for jj=1:nag.num_nodes
+# # #     denominator1  += income_dens_sorted[jj, 2]*income_dens_sorted[jj, 1]
+# # #     denominator2  += income_dens_sorted[jj, 3]*income_dens_sorted[jj, 1]
+# # # end
+
+# # # gini_wealth     = zeros(2)
+
+# # # gini_wealth[1]  = 1.0 - numerator1/denominator1
+# # # gini_wealth[2]  = 1.0 - numerator2/denominator2
+
+# # # @printf("Gini indices on wealth are %.2f and %.2f\n", gini_wealth[1], gini_wealth[2])
 
 
-# # include("do_figures_ssnag_vq.jl")
-# # include("compute_haircut.jl")
-# # include("do_figures_ssnag_trandyn.jl")
+# # # b_poster = [0.0;1.0;3.0]
+
+
+# # # include("do_figures_ssnag_vq.jl")
+# # # include("compute_haircut.jl")
+# # # include("do_figures_ssnag_trandyn.jl")
 

@@ -114,12 +114,17 @@ function compute_bond_supply(nag::NAG_ECM, τval)
 
     e_ss = e_fun(nag,nag.A_bar)
     wage = nag.A_bar
+    
+    tax_coll = 1.0 - τval * dot(wage*nag.lgrid.^(1.0-nag.τ2), nag.Πl_ast)
 
     Bs_mat_out = Array{Float64}(nag.nq)
 
     for (i_q,q_val) in enumerate(nag.qgrid)
 
         Bs_mat_out[i_q] = (e_ss - nag.τY*wage*nag.L_bar - τval)/(q_val - 1.0)
+        if nag.prog_tax
+            Bs_mat_out[i_q] = (e_ss - tax_coll)/(q_val - 1.0)
+        end
         Bs_mat_out[i_q] >= 0.0 || throw(error("Negative B at compute_bond_supply"))
     end
 
@@ -132,6 +137,7 @@ function compute_ss_root_once(nag::NAG_ECM, τval, qgrid_input, bpmat_input)
 
     e_ss = e_fun(nag, nag.A_bar)
     wage = nag.A_bar
+    tax_coll = 1.0 - τval * dot(wage*nag.lgrid.^(1.0-nag.τ2), nag.Πl_ast)
 
     λast_out      = Array{Float64}(size(nag.snodes,1))
     B_demand_temp = 0.0
@@ -141,6 +147,9 @@ function compute_ss_root_once(nag::NAG_ECM, τval, qgrid_input, bpmat_input)
         λast_out, B_demand_temp = compute_SS_once(nag, q_input, qgrid_input, bpmat_input)
 
         B_supply_temp = (e_ss - nag.τY*wage*nag.L_bar - τval)/(q_input - 1.0)
+        if nag.prog_tax
+            B_supply_temp = (e_ss - tax_coll)/(q_input - 1.0)
+        end
         B_supply_temp >= 0.0 || throw(error("Negative B at compute_ss_root"))
 
         dif_B = abs(B_supply_temp - B_demand_temp)
@@ -233,24 +242,39 @@ function compute_Vb_once_ss!(nag::NAG_ECM, Vbp_red_input, qgrid_ext, q_eqm, τva
     # Compute new policies and new envelope        
     for (i_q, q_v) in enumerate(qgrid_ext)  # Loop over q_t on extended qgrid.
         for (i_l, l_v) in enumerate(nag.lgrid)
+            τl = 1.0 - τ_v*l_v^(-nag.τ2)
             for (i_b, b_v) in enumerate(nag.bgrid)
 
                 # First check whether the constraint binds
                 bp_v = nag.bgrid[1]
                 euler_val = uprime(nag, nag.A_bar*l_v*(1.0-nag.τY) + b_v - q_v*bp_v - τval) * q_v - nag.β * itp_EVbp[bp_v, l_v]
+                if nag.prog_tax
+                    euler_val = uprime(nag, nag.A_bar*l_v*(1.0-τl) + b_v - q_v*bp_v - τval) * q_v - nag.β * itp_EVbp[bp_v, l_v]
+                end
                 if euler_val >= 0.0
                     bpol = nag.bgrid[1]
                 else
                     # If constraint not binding, find b' that solves the Euler equation at equality
                     l_bound = nag.bgrid[1]
                     u_bound = max((nag.A_bar*l_v*(1.0-nag.τY) + b_v  - τval)/q_v - 1e-5, nag.bgrid[1]+1e-5)
-                    res     = optimize((bp_v -> abs(uprime(nag,nag.A_bar*l_v*(1.0-nag.τY) + b_v - q_v*bp_v - τval)*q_v - nag.β*itp_EVbp[bp_v,l_v])), l_bound, u_bound, GoldenSection(), iterations = 15)
+                    if nag.prog_tax
+                        u_bound = max((nag.A_bar*l_v*(1.0-τl) + b_v  - τval)/q_v - 1e-5, nag.bgrid[1]+1e-5)
+                    end
+                    if nag.prog_tax
+                        res     = optimize((bp_v -> abs(uprime(nag,nag.A_bar*l_v*(1.0-τl) + b_v - q_v*bp_v - τval)*q_v - nag.β*itp_EVbp[bp_v,l_v])), l_bound, u_bound, GoldenSection(), iterations = 15)
+                    else
+                        res     = optimize((bp_v -> abs(uprime(nag,nag.A_bar*l_v*(1.0-nag.τY) + b_v - q_v*bp_v - τval)*q_v - nag.β*itp_EVbp[bp_v,l_v])), l_bound, u_bound, GoldenSection(), iterations = 15)
+                    end
                     bpol    = Optim.minimizer(res)[1]
                     # bpol    = fzeros((bp_v -> uprime(nag,nag.A_bar*l_v*(1.0-nag.τY) + b_v - q_v*bp_v - τval)*q_v - nag.β*itp_EVbp[bp_v,l_v]), l_bound, u_bound)[1]
                 end
 
                 # Deduce consumption from budget constraint
-                cpol = max(nag.A_bar*l_v*(1.0-nag.τY) + b_v - q_v*bpol - τval, 1e-14)
+                if nag.prog_tax
+                    cpol = max(nag.A_bar*l_v*(1.0-τl) + b_v - q_v*bpol - τval, 1e-14)
+                else
+                    cpol = max(nag.A_bar*l_v*(1.0-nag.τY) + b_v - q_v*bpol - τval, 1e-14)
+                end
                 cpol>0.0 || throw(error("negative consumption $(round(cpol,3)) in solve_backwards_ECM with bonds $(round(bpol,3)) and Euler $(round(euler_val,3))"))
 
                 # Save current choices and value functions
